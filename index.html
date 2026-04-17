@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Реактивная лента | Firebase BaaS</title>
+    <title>🔥 Реактивная лента | Firebase Auth + Google</title>
     <script type="module">
         // ========== ИМПОРТЫ FIREBASE ==========
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
@@ -17,8 +17,22 @@
             query,
             orderBy,
             increment,
-            serverTimestamp
+            serverTimestamp,
+            getDocs
         } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { 
+            getAuth, 
+            signInWithPopup, 
+            GoogleAuthProvider, 
+            signOut, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+        import { 
+            getStorage, 
+            ref, 
+            uploadBytesResumable, 
+            getDownloadURL 
+        } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
         // ========== КОНФИГ (ЗАМЕНИТЕ НА СВОЙ) ==========
        const firebaseConfig = {
@@ -34,18 +48,180 @@
         // Инициализация
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
-        const messagesRef = collection(db, "messages");
+        const auth = getAuth(app);
+        const storage = getStorage(app);
+        const provider = new GoogleAuthProvider();
         
-        // Запрос с сортировкой: сначала новые
+        const messagesRef = collection(db, "messages");
         const q = query(messagesRef, orderBy("timestamp", "desc"));
 
-        // ========== 1. REAL-TIME СЛУШАТЕЛЬ (onSnapshot) ==========
+        // ========== ЭЛЕМЕНТЫ DOM ==========
+        const authSection = document.getElementById("auth-section");
+        const userInfo = document.getElementById("user-info");
+        const userAvatar = document.getElementById("user-avatar");
+        const userEmail = document.getElementById("user-email");
+        const loginBtn = document.getElementById("login-btn");
+        const logoutBtn = document.getElementById("logout-btn");
+        const messageForm = document.getElementById("messageForm");
+        const messageText = document.getElementById("messageText");
+        const imageInput = document.getElementById("imageInput");
+        const imagePreview = document.getElementById("imagePreview");
+        const uploadProgress = document.getElementById("uploadProgress");
+        const feedDiv = document.getElementById("feed");
+        const statusDiv = document.getElementById("status");
+
+        // ========== 1. ОТСЛЕЖИВАНИЕ СОСТОЯНИЯ АВТОРИЗАЦИИ ==========
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                // Пользователь вошёл
+                authSection.classList.add("hidden");
+                userInfo.classList.remove("hidden");
+                userAvatar.src = user.photoURL || "https://via.placeholder.com/40";
+                userEmail.textContent = user.email;
+                messageForm.classList.remove("hidden");
+                statusDiv.innerHTML = `<span style="color:green;">✅ Вы вошли как ${user.displayName || user.email}</span>`;
+            } else {
+                // Пользователь вышел
+                authSection.classList.remove("hidden");
+                userInfo.classList.add("hidden");
+                messageForm.classList.add("hidden");
+                statusDiv.innerHTML = `<span style="color:orange;">⚠️ Войдите через Google, чтобы писать сообщения</span>`;
+            }
+        });
+
+        // ========== 2. ВХОД ЧЕРЕЗ GOOGLE ==========
+        loginBtn.addEventListener("click", async () => {
+            try {
+                const result = await signInWithPopup(auth, provider);
+                console.log("Вошёл:", result.user);
+                statusDiv.innerHTML = `<span style="color:green;">✅ Добро пожаловать, ${result.user.displayName}!</span>`;
+                setTimeout(() => { if (statusDiv.innerHTML.includes("Добро пожаловать")) statusDiv.innerHTML = ""; }, 3000);
+            } catch (error) {
+                console.error("Ошибка входа:", error);
+                statusDiv.innerHTML = `<span style="color:red;">❌ Ошибка входа: ${error.message}</span>`;
+            }
+        });
+
+        // ========== 3. ВЫХОД ==========
+        logoutBtn.addEventListener("click", async () => {
+            try {
+                await signOut(auth);
+                statusDiv.innerHTML = `<span style="color:blue;">👋 Вы вышли из аккаунта</span>`;
+                setTimeout(() => { if (statusDiv.innerHTML.includes("вышли")) statusDiv.innerHTML = ""; }, 2000);
+            } catch (error) {
+                console.error("Ошибка выхода:", error);
+            }
+        });
+
+        // ========== 4. ПРЕДПРОСМОТР КАРТИНКИ ==========
+        imageInput.addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    imagePreview.innerHTML = `<img src="${event.target.result}" alt="Preview">`;
+                    imagePreview.classList.remove("hidden");
+                };
+                reader.readAsDataURL(file);
+            } else {
+                imagePreview.innerHTML = "";
+                imagePreview.classList.add("hidden");
+            }
+        });
+
+        // ========== 5. ЗАГРУЗКА КАРТИНКИ В STORAGE ==========
+        async function uploadImage(file) {
+            if (!file) return null;
+            
+            const user = auth.currentUser;
+            if (!user) throw new Error("Необходима авторизация для загрузки");
+            
+            const timestamp = Date.now();
+            const filename = `${user.uid}_${timestamp}_${file.name}`;
+            const storageRef = ref(storage, `message_images/${filename}`);
+            
+            const uploadTask = uploadBytesResumable(storageRef, file);
+            
+            return new Promise((resolve, reject) => {
+                uploadTask.on('state_changed',
+                    (snapshot) => {
+                        const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+                        uploadProgress.value = progress;
+                        uploadProgress.classList.remove("hidden");
+                        if (progress === 100) {
+                            setTimeout(() => uploadProgress.classList.add("hidden"), 1000);
+                        }
+                    },
+                    (error) => reject(error),
+                    async () => {
+                        const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+                        resolve(downloadURL);
+                    }
+                );
+            });
+        }
+
+        // ========== 6. ОТПРАВКА СООБЩЕНИЯ (С КАРТИНКОЙ ИЛИ БЕЗ) ==========
+        messageForm.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            
+            const user = auth.currentUser;
+            if (!user) {
+                statusDiv.innerHTML = "<span style='color:red;'>❌ Только авторизованные пользователи могут писать!</span>";
+                return;
+            }
+            
+            const text = messageText.value.trim();
+            const imageFile = imageInput.files[0];
+            
+            if (text === "" && !imageFile) {
+                statusDiv.innerHTML = "<span style='color:orange;'>⚠️ Напишите текст или добавьте картинку</span>";
+                return;
+            }
+            
+            if (text.length > 500) {
+                statusDiv.innerHTML = "<span style='color:red;'>❌ Текст не длиннее 500 символов</span>";
+                return;
+            }
+            
+            statusDiv.innerHTML = "<span style='color:blue;'>📤 Отправка...</span>";
+            
+            try {
+                let imageUrl = null;
+                if (imageFile) {
+                    imageUrl = await uploadImage(imageFile);
+                }
+                
+                await addDoc(messagesRef, {
+                    text: text || "",
+                    timestamp: serverTimestamp(),
+                    likes: 0,
+                    userId: user.uid,
+                    userName: user.displayName || user.email,
+                    userPhoto: user.photoURL || "",
+                    imageUrl: imageUrl
+                });
+                
+                statusDiv.innerHTML = "<span style='color:green;'>✅ Сообщение опубликовано!</span>";
+                messageText.value = "";
+                imageInput.value = "";
+                imagePreview.innerHTML = "";
+                imagePreview.classList.add("hidden");
+                uploadProgress.classList.add("hidden");
+                
+                setTimeout(() => { if (statusDiv.innerHTML.includes("опубликовано")) statusDiv.innerHTML = ""; }, 2000);
+            } catch (error) {
+                console.error("Ошибка:", error);
+                statusDiv.innerHTML = `<span style='color:red;'>❌ ${error.message}</span>`;
+            }
+        });
+
+        // ========== 7. REAL-TIME ЛЕНТА (onSnapshot) ==========
         function subscribeToMessages() {
-            const feedDiv = document.getElementById("feed");
             feedDiv.innerHTML = '<div style="text-align:center;">🔄 Загрузка...</div>';
             
             onSnapshot(q, (snapshot) => {
-                feedDiv.innerHTML = ""; // Очищаем
+                feedDiv.innerHTML = "";
                 
                 if (snapshot.empty) {
                     feedDiv.innerHTML = '<div style="text-align:center;">💬 Нет сообщений. Будьте первым!</div>';
@@ -57,11 +233,28 @@
                     const messageId = doc.id;
                     const timestamp = data.timestamp?.toDate().toLocaleString() || "только что";
                     
-                    // Создаём карточку сообщения
                     const card = document.createElement("div");
                     card.className = "message-card";
+                    
+                    // Аватар автора
+                    const authorHtml = data.userName ? `
+                        <div class="message-author">
+                            <img src="${data.userPhoto || 'https://via.placeholder.com/30'}" class="author-avatar" onerror="this.src='https://via.placeholder.com/30'">
+                            <span>${escapeHtml(data.userName)}</span>
+                        </div>
+                    ` : '';
+                    
+                    // Картинка если есть
+                    const imageHtml = data.imageUrl ? `
+                        <div class="message-image">
+                            <img src="${data.imageUrl}" alt="Изображение" onclick="window.open(this.src)">
+                        </div>
+                    ` : '';
+                    
                     card.innerHTML = `
-                        <div class="message-text">${escapeHtml(data.text)}</div>
+                        ${authorHtml}
+                        <div class="message-text">${escapeHtml(data.text) || '<span style="color:#999;">(без текста)</span>'}</div>
+                        ${imageHtml}
                         <div class="message-footer">
                             <span class="timestamp">📅 ${timestamp}</span>
                             <button class="like-btn" data-id="${messageId}">
@@ -72,86 +265,40 @@
                     feedDiv.appendChild(card);
                 });
                 
-                // Вешаем обработчики на кнопки Лайк (после отрисовки)
                 document.querySelectorAll(".like-btn").forEach(btn => {
                     btn.removeEventListener("click", handleLike);
                     btn.addEventListener("click", handleLike);
                 });
             }, (error) => {
-                console.error("Ошибка onSnapshot:", error);
-                document.getElementById("feed").innerHTML = 
-                    `<div style="color:red;">❌ Ошибка Real-time: ${error.message}</div>`;
+                console.error("onSnapshot error:", error);
+                feedDiv.innerHTML = `<div style="color:red;">❌ Ошибка: ${error.message}</div>`;
             });
         }
         
-        // ========== 2. АТОМАРНЫЙ ЛАЙК (increment) ==========
+        // ========== 8. АТОМАРНЫЙ ЛАЙК ==========
         async function handleLike(event) {
             const btn = event.currentTarget;
             const messageId = btn.getAttribute("data-id");
             const likesSpan = btn.querySelector(".likes-count");
             
-            // Оптимистичное обновление (для UX)
             const currentLikes = parseInt(likesSpan.textContent);
             likesSpan.textContent = currentLikes + 1;
             btn.style.opacity = "0.7";
             
             try {
                 const messageRef = doc(db, "messages", messageId);
-                // Атомарное увеличение на 1 — безопасно при параллельных запросах
                 await updateDoc(messageRef, {
                     likes: increment(1)
                 });
-                console.log(`👍 Лайк на сообщение ${messageId} засчитан атомарно`);
             } catch (error) {
-                console.error("❌ Ошибка при лайке:", error);
-                // Откат оптимистичного обновления
+                console.error("Лайк не удался:", error);
                 likesSpan.textContent = currentLikes;
-                alert("Не удалось поставить лайк: " + error.message);
+                alert("Ошибка: " + error.message);
             } finally {
                 btn.style.opacity = "1";
             }
         }
         
-        // ========== 3. ОТПРАВКА НОВОГО СООБЩЕНИЯ ==========
-        document.getElementById("messageForm").addEventListener("submit", async (e) => {
-            e.preventDefault();
-            const textInput = document.getElementById("messageText");
-            const text = textInput.value.trim();
-            const statusDiv = document.getElementById("status");
-            
-            if (text === "") {
-                statusDiv.textContent = "⚠️ Введите текст сообщения";
-                statusDiv.style.color = "orange";
-                return;
-            }
-            
-            if (text.length > 500) {
-                statusDiv.textContent = "❌ Максимум 500 символов";
-                statusDiv.style.color = "red";
-                return;
-            }
-            
-            statusDiv.textContent = "Отправка...";
-            statusDiv.style.color = "blue";
-            
-            try {
-                await addDoc(messagesRef, {
-                    text: text,
-                    timestamp: serverTimestamp(), // серверное время
-                    likes: 0
-                });
-                statusDiv.textContent = "✅ Сообщение добавлено!";
-                statusDiv.style.color = "green";
-                textInput.value = ""; // очищаем
-                setTimeout(() => { statusDiv.textContent = ""; }, 2000);
-            } catch (error) {
-                console.error("Ошибка addDoc:", error);
-                statusDiv.textContent = `❌ Firestore rejected: ${error.message}`;
-                statusDiv.style.color = "red";
-            }
-        });
-        
-        // ========== ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ (XSS защита) ==========
         function escapeHtml(str) {
             if (!str) return "";
             return str.replace(/[&<>]/g, function(m) {
@@ -159,59 +306,81 @@
                 if (m === '<') return '&lt;';
                 if (m === '>') return '&gt;';
                 return m;
-            }).replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, function(c) {
-                return c;
             });
         }
         
-        // Запуск реактивной подписки
+        // Запуск
         subscribeToMessages();
     </script>
     
     <style>
         * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #1a1a2e; margin: 0; padding: 20px; }
-        .container { max-width: 700px; margin: 0 auto; background: white; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); overflow: hidden; }
+        .container { max-width: 800px; margin: 0 auto; background: white; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); overflow: hidden; }
         .header { background: #0f3460; color: white; padding: 20px; text-align: center; }
         .header h1 { margin: 0; font-size: 1.5rem; }
-        .header p { margin: 5px 0 0; opacity: 0.8; font-size: 0.8rem; }
+        .auth-bar { background: #e94560; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        .user-info { display: flex; align-items: center; gap: 10px; }
+        .user-info img { width: 35px; height: 35px; border-radius: 50%; border: 2px solid white; }
+        .btn { background: white; border: none; padding: 8px 20px; border-radius: 30px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .btn-login { background: #4CAF50; color: white; }
+        .btn-logout { background: #ff4444; color: white; }
         .form-area { padding: 20px; background: #f0f2f5; border-bottom: 1px solid #ddd; }
+        .hidden { display: none !important; }
         textarea { width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 12px; font-family: inherit; resize: vertical; font-size: 14px; }
-        button[type="submit"] { background: #e94560; color: white; border: none; padding: 10px 20px; border-radius: 30px; cursor: pointer; font-weight: bold; margin-top: 10px; width: 100%; font-size: 16px; transition: 0.2s; }
-        button[type="submit"]:hover { background: #c72a48; }
-        #status { margin-top: 10px; font-size: 14px; text-align: center; }
+        .image-upload { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .image-preview { margin-top: 10px; max-width: 200px; }
+        .image-preview img { max-width: 100%; border-radius: 10px; border: 2px solid #ddd; }
+        progress { width: 100%; margin-top: 10px; }
+        button[type="submit"] { background: #e94560; color: white; border: none; padding: 10px 20px; border-radius: 30px; cursor: pointer; font-weight: bold; margin-top: 10px; width: 100%; font-size: 16px; }
         .feed { padding: 20px; background: white; min-height: 400px; }
-        .message-card { background: #f8f9fa; border-radius: 15px; padding: 15px; margin-bottom: 15px; border-left: 5px solid #e94560; transition: 0.2s; }
+        .message-card { background: #f8f9fa; border-radius: 15px; padding: 15px; margin-bottom: 15px; border-left: 5px solid #e94560; }
+        .message-author { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 14px; font-weight: bold; color: #0f3460; }
+        .author-avatar { width: 30px; height: 30px; border-radius: 50%; object-fit: cover; }
         .message-text { font-size: 16px; margin-bottom: 10px; word-wrap: break-word; }
+        .message-image { margin: 10px 0; }
+        .message-image img { max-width: 100%; max-height: 300px; border-radius: 10px; cursor: pointer; }
         .message-footer { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: #666; }
-        .like-btn { background: none; border: none; cursor: pointer; font-size: 16px; padding: 5px 12px; border-radius: 30px; transition: 0.2s; display: flex; gap: 5px; align-items: center; }
+        .like-btn { background: none; border: none; cursor: pointer; font-size: 16px; padding: 5px 12px; border-radius: 30px; transition: 0.2s; }
         .like-btn:hover { background: #ffe5e5; transform: scale(1.05); }
-        .likes-count { font-weight: bold; margin-left: 4px; }
-        .timestamp { font-size: 11px; }
         footer { text-align: center; padding: 15px; font-size: 12px; background: #f0f2f5; color: #555; }
     </style>
 </head>
 <body>
 <div class="container">
     <div class="header">
-        <h1>🔥 Реактивная лента (BaaS + Real-time)</h1>
-        <p>Firestore | onSnapshot | Атомарные лайки | Security Rules</p>
+        <h1>🔥 Реактивная лента | Google Auth</h1>
+        <p>Только авторизованные могут писать | Real-time | Картинки</p>
     </div>
     
-    <div class="form-area">
-        <form id="messageForm">
-            <textarea id="messageText" rows="3" placeholder="Напишите сообщение... (до 500 символов)" maxlength="500"></textarea>
-            <button type="submit">📤 Отправить</button>
-        </form>
-        <div id="status"></div>
+    <div class="auth-bar">
+        <div id="auth-section">
+            <button id="login-btn" class="btn btn-login">🔐 Войти через Google</button>
+        </div>
+        <div id="user-info" class="user-info hidden">
+            <img id="user-avatar" src="" alt="Avatar">
+            <span id="user-email"></span>
+            <button id="logout-btn" class="btn btn-logout">🚪 Выйти</button>
+        </div>
+    </div>
+    
+    <div id="messageForm" class="form-area hidden">
+        <textarea id="messageText" rows="3" placeholder="Напишите сообщение... (до 500 символов)" maxlength="500"></textarea>
+        <div class="image-upload">
+            <label for="imageInput" style="background:#ddd; padding:8px 15px; border-radius:30px; cursor:pointer;">📷 Добавить фото</label>
+            <input type="file" id="imageInput" accept="image/*" style="display:none;">
+        </div>
+        <div id="imagePreview" class="image-preview hidden"></div>
+        <progress id="uploadProgress" value="0" max="100" class="hidden"></progress>
+        <button type="submit">📤 Опубликовать</button>
     </div>
     
     <div class="feed" id="feed">
-        <div style="text-align:center;">🔄 Подключение к Firestore...</div>
+        <div style="text-align:center;">🔄 Загрузка...</div>
     </div>
     
     <footer>
-        ⚡ Real-time WebSocket/gRPC | 🔐 Security Rules запрещают delete и edit | ❤️ increment() — атомарно
+        🔐 Google Auth | ⚡ Real-time | ❤️ Атомарные лайки | 🖼️ Загрузка картинок в Storage
     </footer>
 </div>
 </body>
